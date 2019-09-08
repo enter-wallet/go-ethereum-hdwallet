@@ -16,7 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/tyler-smith/go-bip39"
+	bip39 "github.com/tyler-smith/go-bip39"
 )
 
 // DefaultRootDerivationPath is the root path to which custom derivation endpoints
@@ -52,6 +52,47 @@ func newWallet(seed []byte) (*Wallet, error) {
 		accounts:  []accounts.Account{},
 		paths:     map[common.Address]accounts.DerivationPath{},
 	}, nil
+}
+
+func NewFromPubkey(pub string) (*Wallet, error) {
+	masterKey, err := hdkeychain.NewKeyFromString(pub)
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{
+		masterKey: masterKey,
+		seed:      nil,
+		accounts:  []accounts.Account{},
+		paths:     map[common.Address]accounts.DerivationPath{},
+	}, nil
+}
+
+func NewPubString(seed []byte) (string, error) {
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	if err != nil {
+		return "", err
+	}
+	masterPub, err := masterKey.Neuter()
+	if err != nil {
+		return "", err
+	}
+	return masterPub.String(), nil
+}
+func GetPubkey(mnemonic string) (string, error) {
+	if mnemonic == "" {
+		return "", errors.New("mnemonic is required")
+	}
+
+	if !bip39.IsMnemonicValid(mnemonic) {
+		return "", errors.New("mnemonic is invalid")
+	}
+
+	seed, err := NewSeedFromMnemonic(mnemonic)
+	if err != nil {
+		return "", err
+	}
+
+	return NewPubString(seed)
 }
 
 // NewFromMnemonic returns a new wallet from a BIP-39 mnemonic.
@@ -160,6 +201,43 @@ func (w *Wallet) Derive(path accounts.DerivationPath, pin bool) (accounts.Accoun
 	w.stateLock.RLock() // Avoid device disappearing during derivation
 
 	address, err := w.deriveAddress(path)
+
+	w.stateLock.RUnlock()
+
+	// If an error occurred or no pinning was requested, return
+	if err != nil {
+		return accounts.Account{}, err
+	}
+
+	account := accounts.Account{
+		Address: address,
+		URL: accounts.URL{
+			Scheme: "",
+			Path:   path.String(),
+		},
+	}
+
+	if !pin {
+		return account, nil
+	}
+
+	// Pinning needs to modify the state
+	w.stateLock.Lock()
+	defer w.stateLock.Unlock()
+
+	if _, ok := w.paths[address]; !ok {
+		w.accounts = append(w.accounts, account)
+		w.paths[address] = path
+	}
+
+	return account, nil
+}
+
+func (w *Wallet) DeriveFromPath(path accounts.DerivationPath, pin bool) (accounts.Account, error) {
+	// Try to derive the actual account and update its URL if successful
+	w.stateLock.RLock() // Avoid device disappearing during derivation
+
+	address, err := w.DeriveAddr(path)
 
 	w.stateLock.RUnlock()
 
@@ -438,6 +516,24 @@ func (w *Wallet) derivePrivateKey(path accounts.DerivationPath) (*ecdsa.PrivateK
 	return privateKeyECDSA, nil
 }
 
+func (w *Wallet) DerivePubkey(path accounts.DerivationPath) (*ecdsa.PublicKey, error) {
+	var err error
+	key := w.masterKey
+	for _, n := range path {
+		key, err = key.Child(n)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	publicKey, err := key.ECPubKey()
+	if err != nil {
+		return nil, err
+	}
+
+	return publicKey.ToECDSA(), nil
+}
+
 // DerivePublicKey derives the public key of the derivation path.
 func (w *Wallet) derivePublicKey(path accounts.DerivationPath) (*ecdsa.PublicKey, error) {
 	privateKeyECDSA, err := w.derivePrivateKey(path)
@@ -454,6 +550,16 @@ func (w *Wallet) derivePublicKey(path accounts.DerivationPath) (*ecdsa.PublicKey
 	return publicKeyECDSA, nil
 }
 
+func (w *Wallet) DeriveAddr(path accounts.DerivationPath) (common.Address, error) {
+	publicKeyECDSA, err := w.DerivePubkey(path)
+	if err != nil {
+		return common.Address{}, err
+	}
+
+	address := crypto.PubkeyToAddress(*publicKeyECDSA)
+	return address, nil
+}
+
 // DeriveAddress derives the account address of the derivation path.
 func (w *Wallet) deriveAddress(path accounts.DerivationPath) (common.Address, error) {
 	publicKeyECDSA, err := w.derivePublicKey(path)
@@ -468,4 +574,16 @@ func (w *Wallet) deriveAddress(path accounts.DerivationPath) (common.Address, er
 // removeAtIndex removes an account at index.
 func removeAtIndex(accts []accounts.Account, index int) []accounts.Account {
 	return append(accts[:index], accts[index+1:]...)
+}
+
+func GenAddrFromPub(pub, soft_path string) (string, error) {
+	wallet, err := NewFromPubkey(pub)
+	if err != nil {
+		return "", err
+	}
+	account, err := wallet.DeriveFromPath(MustParseDerivationPath(soft_path), false)
+	if err != nil {
+		return "", err
+	}
+	return account.Address.Hex(), nil
 }
