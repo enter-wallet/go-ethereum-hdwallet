@@ -646,3 +646,32 @@ func ParseRelatedDerivationPath(path string) (accounts.DerivationPath, error) {
 	}
 	return result, nil
 }
+
+func (w *Wallet) DeriveKeyFromPath(path accounts.DerivationPath) (*hdkeychain.ExtendedKey, string, error) {
+	// Try to derive the actual account and update its URL if successful
+	w.stateLock.RLock() // Avoid device disappearing during derivation
+	defer w.stateLock.RUnlock()
+	var err error
+	key := w.masterKey
+	for _, n := range path {
+		key, err = key.Child(n)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	keyPub, err := key.Neuter()
+	if err != nil {
+		return nil, "", err
+	}
+	return key, keyPub.String(), nil
+	//publicKey, err := key.ECPubKey()
+	//if err != nil {
+	//	return nil, err
+	//}
+	//privateKey, err := key.ECPrivKey()
+	//if err != nil {
+	//	return nil,nil,nil, err
+	//}
+	//privateKeyECDSA := privateKey.ToECDSA()
+	//publicKey.ToECDSA(), nil
+}
